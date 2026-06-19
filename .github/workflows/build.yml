@@ -60,8 +60,10 @@ jobs:
             NODE_VERSION=20.19.2
           # FONTOS: az apps.json secret mountkent megy at, nem build-argkent –
           # a layered Containerfile ezt a patternt varja.
-          secrets: |
-            "apps_json=${{ github.workspace }}/apps.json"
+          # 'secret-files' kell, nem 'secrets'! Az elobbi a FAJL TARTALMAT
+          # mounteli secretkent, az utobbi inline string erteket varna.
+          secret-files: |
+            apps_json=${{ github.workspace }}/apps.json
           # cache-from szandekosan kihagyva: a regi (toredek) cache-t igy
           # nem hasznalja fel. A cache-to a friss, teljes buildet menti.
           cache-to: type=gha,mode=max
