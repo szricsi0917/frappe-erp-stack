@@ -1,0 +1,11 @@
+# Sosem commitolj valodi .env-et!
+.env
+.env.local
+.env.production
+*.env.backup
+
+# OS / IDE szemet
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
