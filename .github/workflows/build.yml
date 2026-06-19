@@ -32,11 +32,6 @@ jobs:
           path: frappe_docker
           ref: main
 
-      - name: Encode apps.json to base64
-        id: encode
-        run: |
-          echo "APPS_JSON_BASE64=$(base64 -w 0 apps.json)" >> $GITHUB_OUTPUT
-
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -63,6 +58,10 @@ jobs:
             FRAPPE_BRANCH=version-16
             PYTHON_VERSION=3.11.6
             NODE_VERSION=20.19.2
-            APPS_JSON_BASE64=${{ steps.encode.outputs.APPS_JSON_BASE64 }}
-          cache-from: type=gha
+          # FONTOS: az apps.json secret mountkent megy at, nem build-argkent –
+          # a layered Containerfile ezt a patternt varja.
+          secrets: |
+            "apps_json=${{ github.workspace }}/apps.json"
+          # cache-from szandekosan kihagyva: a regi (toredek) cache-t igy
+          # nem hasznalja fel. A cache-to a friss, teljes buildet menti.
           cache-to: type=gha,mode=max
