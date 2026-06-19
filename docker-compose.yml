@@ -1,14 +1,19 @@
 # ==========================================================================
-#  ERPNext v16 + 10 app – HegyesiHQ – ELES – Unraid / Portainer (standalone)
-#  Sajat buildelt image: ghcr.io/szricsi0917/hegyesihq-engine:v16
+#  Frappe ERP Stack – éles (production) Docker Compose
+#
+#  Ez egy template. Másold le, állítsd be a .env fájlt,
+#  majd: docker compose up -d
+#
+#  Részletes dokumentáció: lásd README.md
 # ==========================================================================
+
+x-image: &image
+  image: ${IMAGE:-ghcr.io/szricsi0917/frappe-erp-stack}:${TAG:-v16}
 
 services:
 
   db:
     image: mariadb:11.8
-    container_name: frappe-db
-    networks: [hegyesihq_network]
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
@@ -19,31 +24,26 @@ services:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
       - --skip-character-set-client-handshake
-      - --innodb-buffer-pool-size=2G
+      - --innodb-buffer-pool-size=${INNODB_BUFFER_POOL_SIZE:-2G}
     environment:
       MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
       MARIADB_ROOT_PASSWORD: ${DB_PASSWORD}
     volumes:
-      - /mnt/cache/appdata/hegyesihq-engine/db-data:/var/lib/mysql
+      - ${DB_DIR:-./data/db}:/var/lib/mysql
 
   redis-cache:
     image: redis:6.2-alpine
-    container_name: frappe-redis-cache
-    networks: [hegyesihq_network]
     restart: unless-stopped
+    # A cache adat múlékony, szándékosan nincs volume.
 
   redis-queue:
     image: redis:6.2-alpine
-    container_name: frappe-redis-queue
-    networks: [hegyesihq_network]
     restart: unless-stopped
     volumes:
-      - /mnt/cache/appdata/hegyesihq-engine/redis-queue-data:/data
+      - ${REDIS_QUEUE_DIR:-./data/redis-queue}:/data
 
   configurator:
-    image: ghcr.io/szricsi0917/hegyesihq-engine:v16
-    container_name: frappe-configurator
-    networks: [hegyesihq_network]
+    <<: *image
     restart: on-failure
     depends_on:
       db:
@@ -71,15 +71,14 @@ services:
       REDIS_QUEUE: redis-queue:6379
       SOCKETIO_PORT: "9000"
     volumes:
-      - /mnt/cache/appdata/hegyesihq-engine/sites:/home/frappe/frappe-bench/sites
-      - /mnt/cache/appdata/hegyesihq-engine/logs:/home/frappe/frappe-bench/logs
+      - ${SITES_DIR:-./data/sites}:/home/frappe/frappe-bench/sites
+      - ${LOGS_DIR:-./data/logs}:/home/frappe/frappe-bench/logs
 
-  # Idempotens: letrehozza a site-ot ha nem letezik, kulonben csak
-  # ellenorzi/installalja a hianyzo app-okat es lefuttatja a migrate-et.
+  # Idempotens site-bootstrap: ha a site nem létezik, létrehozza;
+  # majd biztosítja, hogy minden, az image-en lévő app telepítve legyen,
+  # végül lefuttat egy `bench migrate`-et.
   create-site:
-    image: ghcr.io/szricsi0917/hegyesihq-engine:v16
-    container_name: frappe-create-site
-    networks: [hegyesihq_network]
+    <<: *image
     restart: "no"
     depends_on:
       configurator:
@@ -91,7 +90,7 @@ services:
       - |
         set -e
         if [ ! -f "sites/$$SITE_NAME/site_config.json" ]; then
-          echo ">>> Uj site letrehozasa es ERPNext telepitese: $$SITE_NAME"
+          echo ">>> Új site létrehozása és ERPNext telepítése: $$SITE_NAME"
           bench new-site "$$SITE_NAME" \
             --mariadb-user-host-login-scope='%' \
             --db-root-username=root \
@@ -100,53 +99,49 @@ services:
             --install-app erpnext \
             --set-default
         else
-          echo ">>> A site mar letezik: $$SITE_NAME (a letrehozast atugorjuk)"
+          echo ">>> A site már létezik: $$SITE_NAME (létrehozás kihagyva)"
         fi
 
-        echo ">>> Hianyzo app-ok telepitese"
+        echo ">>> Hiányzó appok telepítése"
         INSTALLED=$$(bench --site "$$SITE_NAME" list-apps 2>/dev/null || true)
         for app in hrms helpdesk insights builder wiki lms gameplan print_designer crm; do
           if echo "$$INSTALLED" | grep -qw "$$app"; then
-            echo "  - $$app: mar telepitve, atugras"
+            echo "  - $$app: már telepítve, kihagyás"
           else
-            echo "  - $$app: telepites..."
-            bench --site "$$SITE_NAME" install-app "$$app" || echo "  ! $$app telepites sikertelen, folytatas"
+            echo "  - $$app: telepítés..."
+            bench --site "$$SITE_NAME" install-app "$$app" || echo "  ! $$app telepítés sikertelen, folytatás"
           fi
         done
 
-        echo ">>> Migracio futtatasa"
+        echo ">>> Migráció futtatása"
         bench --site "$$SITE_NAME" migrate
-        echo ">>> Kesz."
+        echo ">>> Kész."
     environment:
       SITE_NAME: ${SITE_NAME}
       ROOT_PASS: ${DB_PASSWORD}
-      ADMIN_PASS: ${ERPNEXT_ADMIN_PASSWORD}
+      ADMIN_PASS: ${ADMIN_PASSWORD}
     volumes:
-      - /mnt/cache/appdata/hegyesihq-engine/sites:/home/frappe/frappe-bench/sites
-      - /mnt/cache/appdata/hegyesihq-engine/logs:/home/frappe/frappe-bench/logs
+      - ${SITES_DIR:-./data/sites}:/home/frappe/frappe-bench/sites
+      - ${LOGS_DIR:-./data/logs}:/home/frappe/frappe-bench/logs
 
   backend:
-    image: ghcr.io/szricsi0917/hegyesihq-engine:v16
-    container_name: frappe-backend
-    networks: [hegyesihq_network]
+    <<: *image
     restart: unless-stopped
     depends_on:
       create-site:
         condition: service_completed_successfully
     environment:
-      GUNICORN_WORKERS: "4"
-      GUNICORN_THREADS: "4"
-      GUNICORN_TIMEOUT: "120"
+      GUNICORN_WORKERS: ${GUNICORN_WORKERS:-4}
+      GUNICORN_THREADS: ${GUNICORN_THREADS:-4}
+      GUNICORN_TIMEOUT: ${GUNICORN_TIMEOUT:-120}
     volumes:
-      - /mnt/cache/appdata/hegyesihq-engine/sites:/home/frappe/frappe-bench/sites
-      - /mnt/cache/appdata/hegyesihq-engine/logs:/home/frappe/frappe-bench/logs
-      - /mnt/user/HegyesiHQ/uploads/public:/home/frappe/frappe-bench/sites/${SITE_NAME}/public/files
-      - /mnt/user/HegyesiHQ/uploads/private:/home/frappe/frappe-bench/sites/${SITE_NAME}/private/files
+      - ${SITES_DIR:-./data/sites}:/home/frappe/frappe-bench/sites
+      - ${LOGS_DIR:-./data/logs}:/home/frappe/frappe-bench/logs
+      - ${UPLOADS_PUBLIC_DIR:-./data/uploads/public}:/home/frappe/frappe-bench/sites/${SITE_NAME}/public/files
+      - ${UPLOADS_PRIVATE_DIR:-./data/uploads/private}:/home/frappe/frappe-bench/sites/${SITE_NAME}/private/files
 
   websocket:
-    image: ghcr.io/szricsi0917/hegyesihq-engine:v16
-    container_name: frappe-websocket
-    networks: [hegyesihq_network]
+    <<: *image
     restart: unless-stopped
     depends_on:
       create-site:
@@ -155,13 +150,11 @@ services:
       - node
       - /home/frappe/frappe-bench/apps/frappe/socketio.js
     volumes:
-      - /mnt/cache/appdata/hegyesihq-engine/sites:/home/frappe/frappe-bench/sites
-      - /mnt/cache/appdata/hegyesihq-engine/logs:/home/frappe/frappe-bench/logs
+      - ${SITES_DIR:-./data/sites}:/home/frappe/frappe-bench/sites
+      - ${LOGS_DIR:-./data/logs}:/home/frappe/frappe-bench/logs
 
   frontend:
-    image: ghcr.io/szricsi0917/hegyesihq-engine:v16
-    container_name: frappe-frontend
-    networks: [hegyesihq_network]
+    <<: *image
     restart: unless-stopped
     depends_on:
       - backend
@@ -176,60 +169,50 @@ services:
       UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
       UPSTREAM_REAL_IP_RECURSIVE: "off"
       PROXY_READ_TIMEOUT: "120"
-      CLIENT_MAX_BODY_SIZE: 100m
+      CLIENT_MAX_BODY_SIZE: ${CLIENT_MAX_BODY_SIZE:-100m}
     volumes:
-      - /mnt/cache/appdata/hegyesihq-engine/sites:/home/frappe/frappe-bench/sites
-      - /mnt/cache/appdata/hegyesihq-engine/logs:/home/frappe/frappe-bench/logs
-      - /mnt/user/HegyesiHQ/uploads/public:/home/frappe/frappe-bench/sites/${SITE_NAME}/public/files
-      - /mnt/user/HegyesiHQ/uploads/private:/home/frappe/frappe-bench/sites/${SITE_NAME}/private/files
+      - ${SITES_DIR:-./data/sites}:/home/frappe/frappe-bench/sites
+      - ${LOGS_DIR:-./data/logs}:/home/frappe/frappe-bench/logs
+      - ${UPLOADS_PUBLIC_DIR:-./data/uploads/public}:/home/frappe/frappe-bench/sites/${SITE_NAME}/public/files
+      - ${UPLOADS_PRIVATE_DIR:-./data/uploads/private}:/home/frappe/frappe-bench/sites/${SITE_NAME}/private/files
     ports:
-      - "1701:8080"
+      - "${HTTP_PORT:-8080}:8080"
 
   queue-long:
-    image: ghcr.io/szricsi0917/hegyesihq-engine:v16
-    container_name: frappe-queue-long
-    networks: [hegyesihq_network]
+    <<: *image
     restart: unless-stopped
     depends_on:
       create-site:
         condition: service_completed_successfully
     command: ["bench", "worker", "--queue", "long,default,short"]
     volumes:
-      - /mnt/cache/appdata/hegyesihq-engine/sites:/home/frappe/frappe-bench/sites
-      - /mnt/cache/appdata/hegyesihq-engine/logs:/home/frappe/frappe-bench/logs
-      - /mnt/user/HegyesiHQ/uploads/public:/home/frappe/frappe-bench/sites/${SITE_NAME}/public/files
-      - /mnt/user/HegyesiHQ/uploads/private:/home/frappe/frappe-bench/sites/${SITE_NAME}/private/files
+      - ${SITES_DIR:-./data/sites}:/home/frappe/frappe-bench/sites
+      - ${LOGS_DIR:-./data/logs}:/home/frappe/frappe-bench/logs
+      - ${UPLOADS_PUBLIC_DIR:-./data/uploads/public}:/home/frappe/frappe-bench/sites/${SITE_NAME}/public/files
+      - ${UPLOADS_PRIVATE_DIR:-./data/uploads/private}:/home/frappe/frappe-bench/sites/${SITE_NAME}/private/files
 
   queue-short:
-    image: ghcr.io/szricsi0917/hegyesihq-engine:v16
-    container_name: frappe-queue-short
-    networks: [hegyesihq_network]
+    <<: *image
     restart: unless-stopped
     depends_on:
       create-site:
         condition: service_completed_successfully
     command: ["bench", "worker", "--queue", "short,default"]
     volumes:
-      - /mnt/cache/appdata/hegyesihq-engine/sites:/home/frappe/frappe-bench/sites
-      - /mnt/cache/appdata/hegyesihq-engine/logs:/home/frappe/frappe-bench/logs
-      - /mnt/user/HegyesiHQ/uploads/public:/home/frappe/frappe-bench/sites/${SITE_NAME}/public/files
-      - /mnt/user/HegyesiHQ/uploads/private:/home/frappe/frappe-bench/sites/${SITE_NAME}/private/files
+      - ${SITES_DIR:-./data/sites}:/home/frappe/frappe-bench/sites
+      - ${LOGS_DIR:-./data/logs}:/home/frappe/frappe-bench/logs
+      - ${UPLOADS_PUBLIC_DIR:-./data/uploads/public}:/home/frappe/frappe-bench/sites/${SITE_NAME}/public/files
+      - ${UPLOADS_PRIVATE_DIR:-./data/uploads/private}:/home/frappe/frappe-bench/sites/${SITE_NAME}/private/files
 
   scheduler:
-    image: ghcr.io/szricsi0917/hegyesihq-engine:v16
-    container_name: frappe-scheduler
-    networks: [hegyesihq_network]
+    <<: *image
     restart: unless-stopped
     depends_on:
       create-site:
         condition: service_completed_successfully
     command: ["bench", "schedule"]
     volumes:
-      - /mnt/cache/appdata/hegyesihq-engine/sites:/home/frappe/frappe-bench/sites
-      - /mnt/cache/appdata/hegyesihq-engine/logs:/home/frappe/frappe-bench/logs
-      - /mnt/user/HegyesiHQ/uploads/public:/home/frappe/frappe-bench/sites/${SITE_NAME}/public/files
-      - /mnt/user/HegyesiHQ/uploads/private:/home/frappe/frappe-bench/sites/${SITE_NAME}/private/files
-
-networks:
-  hegyesihq_network:
-    external: true
+      - ${SITES_DIR:-./data/sites}:/home/frappe/frappe-bench/sites
+      - ${LOGS_DIR:-./data/logs}:/home/frappe/frappe-bench/logs
+      - ${UPLOADS_PUBLIC_DIR:-./data/uploads/public}:/home/frappe/frappe-bench/sites/${SITE_NAME}/public/files
+      - ${UPLOADS_PRIVATE_DIR:-./data/uploads/private}:/home/frappe/frappe-bench/sites/${SITE_NAME}/private/files
