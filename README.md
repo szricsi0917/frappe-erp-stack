@@ -1,6 +1,6 @@
 # hegyesihq-engine
 
-Sajat ERPNext v16 image a HegyesiHQ telekom-rendszerhez.
+Sajat ERPNext v16 image a HegyesiHQ rendszerhez.
 Build: GitHub Actions -> push -> GHCR (`ghcr.io/szricsi0917/hegyesihq-engine`).
 Deploy: Unraid + Portainer (standalone Docker).
 
