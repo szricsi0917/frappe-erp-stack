@@ -1,0 +1,68 @@
+name: Build and Push Image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps.json'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:       # kezi inditas a GitHub felulet "Actions" fulrol
+  schedule:
+    - cron: '0 3 * * 0'    # vasarnap 03:00 UTC – heti automatikus rebuild a friss patchekert
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/hegyesihq-engine
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      - name: Checkout frappe_docker
+        uses: actions/checkout@v4
+        with:
+          repository: frappe/frappe_docker
+          path: frappe_docker
+          ref: main
+
+      - name: Encode apps.json to base64
+        id: encode
+        run: |
+          echo "APPS_JSON_BASE64=$(base64 -w 0 apps.json)" >> $GITHUB_OUTPUT
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: frappe_docker
+          file: frappe_docker/images/layered/Containerfile
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v16
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          build-args: |
+            FRAPPE_PATH=https://github.com/frappe/frappe
+            FRAPPE_BRANCH=version-16
+            PYTHON_VERSION=3.11.6
+            NODE_VERSION=20.19.2
+            APPS_JSON_BASE64=${{ steps.encode.outputs.APPS_JSON_BASE64 }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
