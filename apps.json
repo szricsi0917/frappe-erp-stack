@@ -49,10 +49,10 @@
   },
   { 
     "url": "https://github.com/kid1194/frappe-active-users",   
-    "branch": "develop" 
+    "branch": "main" 
   },
   { 
     "url": "https://github.com/kid1194/frappe-better-numerical-controls", 
-    "branch": "develop" 
+    "branch": "main" 
   }
 ]
