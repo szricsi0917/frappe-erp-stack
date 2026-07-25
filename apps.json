@@ -48,10 +48,6 @@
     "branch": "develop" 
   },
   { 
-    "url": "https://github.com/phamos-eu/it_management", 
-    "branch": "develop" 
-  },
-  { 
     "url": "https://github.com/kid1194/frappe-active-users",   
     "branch": "develop" 
   },
