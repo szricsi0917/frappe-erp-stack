@@ -7,8 +7,12 @@ on:
       - 'apps.json'
       - '.github/workflows/build.yml'
   workflow_dispatch:       # kezi inditas a GitHub felulet "Actions" fulrol
-  schedule:
-    - cron: '0 3 * * 0'    # vasarnap 03:00 UTC – heti automatikus rebuild a friss patchekert
+  
+# ===================================================
+#  Automatikus frissítés ütemezése. (jelenleg ki van kapcsolva)
+ # schedule:
+   # - cron: '0 3 * * 0'    # vasarnap 03:00 UTC – heti automatikus rebuild a friss patchekert
+# ===================================================
 
 env:
   REGISTRY: ghcr.io
