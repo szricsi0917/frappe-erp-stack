@@ -28,6 +28,10 @@
     "branch": "develop"
   },
   {
+    "url": "https://github.com/frappe/payments",
+    "branch": "develop"
+  },
+  {
     "url": "https://github.com/frappe/lms",
     "branch": "develop"
   },
@@ -43,8 +47,8 @@
     "url": "https://github.com/frappe/crm",
     "branch": "develop"
   },
-  { 
-    "url": "https://github.com/alyf-de/pdf_on_submit", 
-    "branch": "develop" 
+  {
+    "url": "https://github.com/alyf-de/pdf_on_submit",
+    "branch": "develop"
   }
 ]
