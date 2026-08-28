@@ -6,17 +6,26 @@ on:
     paths:
       - 'apps.json'
       - '.github/workflows/build.yml'
-  workflow_dispatch:       # kezi inditas a GitHub felulet "Actions" fulrol
-  
-# ===================================================
-#  Automatikus frissítés ütemezése. (jelenleg ki van kapcsolva)
- # schedule:
-   # - cron: '0 3 * * 0'    # vasarnap 03:00 UTC – heti automatikus rebuild a friss patchekert
-# ===================================================
+  workflow_dispatch:        # kezi inditas az "Actions" fulrol
+
+# ---------------------------------------------------------------------
+#  Automatikus heti rebuild - SZANDEKOSAN kikapcsolva.
+#  Production ERP-nel a rebuild legyen tudatos dontes, ne utemezett,
+#  mert a develop agas appok tipje barmikor valtozhat.
+#  Ha vissza akarod kapcsolni, elobb legyen mukodo staging.
+# ---------------------------------------------------------------------
+#  schedule:
+#    - cron: '0 3 * * 0'
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+
+  # A frappe_docker referencia is MOZGO, ha 'main'-en hagyod: a
+  # Containerfile viselkedese valtozhat ket build kozott. Reprodukalhato
+  # buildhez rogzitsd egy konkret commitra.
+  # SHA-k: https://github.com/frappe/frappe_docker/commits/main
+  FRAPPE_DOCKER_REF: main
 
 jobs:
   build:
@@ -29,12 +38,32 @@ jobs:
       - name: Checkout this repo
         uses: actions/checkout@v4
 
+      # -----------------------------------------------------------------
+      #  Egyedi, VISSZAGURITHATO tag eloallitasa.
+      #
+      #  Formatum:  v16-<datum>-<rovid_sha>-<run_number>
+      #  Pl.:       v16-20260828-a1b2c3d-42
+      #
+      #  Miert nem eleg a github.sha?  Mert a workflow_dispatch ugyanazt a
+      #  commitot UJRA tudja buildelni, ekkor felulirna a :<sha> taget egy
+      #  masik tartalmu image-dzsel (frissebb develop tip). A run_number
+      #  minden futasnal no -> minden build EGYEDI, felulirhatatlan tag.
+      # -----------------------------------------------------------------
+      - name: Compute image tag
+        id: meta
+        run: |
+          DATE=$(date -u +%Y%m%d)
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          UNIQUE="v16-${DATE}-${SHORT_SHA}-${{ github.run_number }}"
+          echo "unique_tag=${UNIQUE}" >> "$GITHUB_OUTPUT"
+          echo ">>> Egyedi tag: ${UNIQUE}"
+
       - name: Checkout frappe_docker
         uses: actions/checkout@v4
         with:
           repository: frappe/frappe_docker
           path: frappe_docker
-          ref: main
+          ref: ${{ env.FRAPPE_DOCKER_REF }}
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -53,21 +82,72 @@ jobs:
           file: frappe_docker/images/layered/Containerfile
           push: true
           platforms: linux/amd64
+          # ---------------------------------------------------------------
+          #  Tagek:
+          #   - unique_tag : EZ a visszaguritas alapja. A stack .env-je ezt
+          #                  hasznalja. Felulirhatatlan.
+          #   - v16        : mozgo "legfrissebb v16" mutato, KENYELEMBOL.
+          #                  A stack SOHA ne erre mutasson.
+          #
+          #  Torolve a korabbi ':latest' (veszelyes: a docker pull/run
+          #  alapertelmezett celpontja) es a ':<sha>' (a unique_tag ugyis
+          #  tartalmazza a sha-t, es a run_number egyedive teszi).
+          # ---------------------------------------------------------------
           tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.unique_tag }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v16
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          # ---------------------------------------------------------------
+          #  A PYTHON_VERSION / NODE_VERSION argok TOROLVE.
+          #  A layered Containerfile ezeket NEM hasznalja - a verziok a
+          #  version-16 base image-bol jonnek (jelenleg Python 3.14 / Node 24).
+          #  A korabbi 3.11.6 / 20.19.2 no-op volt es felrevezetett.
+          # ---------------------------------------------------------------
           build-args: |
             FRAPPE_PATH=https://github.com/frappe/frappe
             FRAPPE_BRANCH=version-16
-            PYTHON_VERSION=3.11.6
-            NODE_VERSION=20.19.2
-          # FONTOS: az apps.json secret mountkent megy at, nem build-argkent –
-          # a layered Containerfile ezt a patternt varja.
-          # 'secret-files' kell, nem 'secrets'! Az elobbi a FAJL TARTALMAT
-          # mounteli secretkent, az utobbi inline string erteket varna.
+          # A secret-files (nem build-arg) a biztonsagos minta: az apps.json
+          # tartalma nem kerul be az image reteg-metaadatba. Ez jol volt.
           secret-files: |
             apps_json=${{ github.workspace }}/apps.json
-          # cache-from szandekosan kihagyva: a regi (toredek) cache-t igy
-          # nem hasznalja fel. A cache-to a friss, teljes buildet menti.
           cache-to: type=gha,mode=max
+
+      # -----------------------------------------------------------------
+      #  BUILD-IDEJU ELLENORZES.
+      #
+      #  Ez a build-oldali parja a create-site ellenorzesnek. Ha egy app
+      #  kimaradt az image-bol (pl. hianyzo fuggoseg, mint anno az lms ->
+      #  payments), a build ITT elhasal, nem elesben derul ki.
+      # -----------------------------------------------------------------
+      - name: Verify apps are present in image
+        run: |
+          IMG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.unique_tag }}"
+          echo ">>> Image lehuzasa ellenorzeshez: $IMG"
+          docker pull "$IMG"
+
+          echo ">>> Az image apps/ konyvtaranak tartalma:"
+          docker run --rm --entrypoint bash "$IMG" \
+            -c "ls -1 /home/frappe/frappe-bench/apps/" | tee /tmp/apps_in_image.txt
+
+          # Elvart appok = frappe (build-arg) + minden apps.json bejegyzes
+          # (a repo-nev az URL utolso szegmense, .git nelkul).
+          EXPECTED="frappe $(jq -r '.[].url' apps.json | sed 's#.*/##; s#\.git$##')"
+
+          echo ">>> Elvart appok ellenorzese:"
+          MISSING=""
+          for app in $EXPECTED; do
+            if grep -qx "$app" /tmp/apps_in_image.txt; then
+              echo "  OK   $app"
+            else
+              echo "  HIBA $app  <-- HIANYZIK"
+              MISSING="$MISSING $app"
+            fi
+          done
+
+          if [ -n "$MISSING" ]; then
+            echo ""
+            echo "!!! A build HIBAS: a kovetkezo appok nincsenek az image-ben:$MISSING"
+            echo "!!! Valoszinu ok: hianyzo fuggoseg vagy rossz branch az apps.json-ban."
+            exit 1
+          fi
+          echo ""
+          echo ">>> OK: minden elvart app benne van az image-ben."
