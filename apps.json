@@ -46,9 +46,5 @@
   {
     "url": "https://github.com/frappe/crm",
     "branch": "develop"
-  },
-  {
-    "url": "https://github.com/alyf-de/pdf_on_submit",
-    "branch": "develop"
   }
 ]
