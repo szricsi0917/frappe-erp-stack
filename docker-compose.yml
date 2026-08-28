@@ -1,19 +1,45 @@
-# ==========================================================================
-#  Frappe ERP Stack – éles (production) Docker Compose
+# =====================================================================
+#  HegyesiHQ - Frappe ERP Stack (production)  v2
+# ---------------------------------------------------------------------
+#  Ez a fájl EGYSZERRE megy a GitHubra és a Portainerbe.
+#  Minden környezetfüggő érték .env-ből jön.
 #
-#  Ez egy template. Másold le, állítsd be a .env fájlt,
-#  majd: docker compose up -d
-#
-#  Részletes dokumentáció: lásd README.md
-# ==========================================================================
+#  VÁLTOZÁSOK a korábbi két, szétcsúszott verzióhoz képest:
+#   1. Egységes x-image anchor + ${TAG}  -> visszagurítható verziózás
+#   2. backups mount a files-fán KÍVÜLRE -> megszűnik a matrjoska-jelenség
+#   3. create-site: || echo kivágva      -> a hiba nem tud elrejtőzni
+#   4. create-site: telepítés-ellenőrzés -> az lms-eset nem ismétlődhet
+#   5. create-site: kötelező DB-mentés a migrate ELŐTT
+#   6. payments felvéve az lms ELÉ       -> az lms függősége
+#   7. pdf_on_submit felvéve             -> eddig hiányzott a listából
+#   8. MARIADB_AUTO_UPGRADE: 1           -> hiányzott
+#   9. mariadb / redis patch-szintre rögzítve
+#  10. UPSTREAM_REAL_IP_ADDRESS javítva  -> valódi kliens-IP
+#  11. healthcheck backend / frontend / redis
+#  12. redis-cache volume törölve        -> a cache múlékony
+# =====================================================================
 
 x-image: &image
-  image: ${IMAGE:-ghcr.io/szricsi0917/frappe-erp-stack}:${TAG:-v16}
+  image: ${IMAGE:-ghcr.io/szricsi0917/frappe-erp-stack}:${TAG:?A TAG kotelezo - ne hasznalj mozgo :v16 taget}
+
+x-sites-logs: &sites-logs
+  - ${SITES_DIR:?}:/home/frappe/frappe-bench/sites
+  - ${LOGS_DIR:?}:/home/frappe/frappe-bench/logs
+
+x-uploads: &uploads
+  - ${UPLOADS_PUBLIC_DIR:?}:/home/frappe/frappe-bench/sites/${SITE_NAME}/public/files
+  - ${UPLOADS_PRIVATE_DIR:?}:/home/frappe/frappe-bench/sites/${SITE_NAME}/private/files
+
+x-backups: &backups
+  - ${BACKUPS_DIR:?}:/home/frappe/frappe-bench/sites/${SITE_NAME}/private/backups
 
 services:
 
+  # -------------------------------------------------------------------
   db:
-    image: mariadb:11.8
+    image: mariadb:${MARIADB_TAG:-11.8.8}
+    container_name: frappe-db
+    networks: [hegyesihq_network]
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
@@ -26,35 +52,57 @@ services:
       - --skip-character-set-client-handshake
       - --innodb-buffer-pool-size=${INNODB_BUFFER_POOL_SIZE:-2G}
     environment:
-      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
-      MARIADB_ROOT_PASSWORD: ${DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:?}
+      MARIADB_ROOT_PASSWORD: ${DB_PASSWORD:?}
+      # Minor verzióváltás után automatikusan lefuttatja a mysql_upgrade-et.
+      MARIADB_AUTO_UPGRADE: "1"
     volumes:
-      - ${DB_DIR:-./data/db}:/var/lib/mysql
+      - ${DB_DIR:?}:/var/lib/mysql
 
+  # -------------------------------------------------------------------
   redis-cache:
-    image: redis:6.2-alpine
+    image: redis:${REDIS_TAG:-7.4-alpine}
+    container_name: frappe-redis-cache
+    networks: [hegyesihq_network]
     restart: unless-stopped
-    # A cache adat múlékony, szándékosan nincs volume.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    # A cache adat múlékony: szándékosan NINCS volume.
+    # Újraindításkor a Frappe újraépíti.
 
   redis-queue:
-    image: redis:6.2-alpine
+    image: redis:${REDIS_TAG:-7.4-alpine}
+    container_name: frappe-redis-queue
+    networks: [hegyesihq_network]
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     volumes:
-      - ${REDIS_QUEUE_DIR:-./data/redis-queue}:/data
+      - ${REDIS_QUEUE_DIR:?}:/data
 
+  # -------------------------------------------------------------------
   configurator:
     <<: *image
+    container_name: frappe-configurator
+    networks: [hegyesihq_network]
     restart: on-failure
     depends_on:
       db:
         condition: service_healthy
       redis-cache:
-        condition: service_started
+        condition: service_healthy
       redis-queue:
-        condition: service_started
+        condition: service_healthy
     entrypoint: ["bash", "-c"]
     command:
       - >
+        set -euo pipefail;
         if [ ! -f sites/common_site_config.json ]; then echo "{}" > sites/common_site_config.json; fi;
         ls -1 apps > sites/apps.txt;
         bench set-config -g db_host $$DB_HOST;
@@ -64,21 +112,26 @@ services:
         bench set-config -g redis_socketio "redis://$$REDIS_QUEUE";
         bench set-config -gp socketio_port $$SOCKETIO_PORT;
         bench set-config -g chromium_path /usr/bin/chromium-headless-shell;
+        echo ">>> Konfiguracio kesz.";
     environment:
       DB_HOST: db
       DB_PORT: "3306"
       REDIS_CACHE: redis-cache:6379
       REDIS_QUEUE: redis-queue:6379
       SOCKETIO_PORT: "9000"
-    volumes:
-      - ${SITES_DIR:-./data/sites}:/home/frappe/frappe-bench/sites
-      - ${LOGS_DIR:-./data/logs}:/home/frappe/frappe-bench/logs
+    volumes: *sites-logs
 
-  # Idempotens site-bootstrap: ha a site nem létezik, létrehozza;
-  # majd biztosítja, hogy minden, az image-en lévő app telepítve legyen,
-  # végül lefuttat egy `bench migrate`-et.
+  # -------------------------------------------------------------------
+  #  Site bootstrap.
+  #
+  #  FONTOS: ez a konténer MINDEN stack-indításkor lefut, mert a többi
+  #  szolgáltatás a sikeres befejezését várja. Ezért itt fut a migrate is,
+  #  és ezért KÖTELEZŐ előtte a mentés.
+  # -------------------------------------------------------------------
   create-site:
     <<: *image
+    container_name: frappe-create-site
+    networks: [hegyesihq_network]
     restart: "no"
     depends_on:
       configurator:
@@ -88,9 +141,15 @@ services:
     entrypoint: ["bash", "-c"]
     command:
       - |
-        set -e
+        set -euo pipefail
+
+        # A telepítendő appok listája. A SORREND SZÁMÍT:
+        # a payments-nek az lms ELŐTT kell települnie (import-függőség).
+        APPS="hrms payments lms helpdesk insights builder wiki gameplan print_designer crm pdf_on_submit"
+
+        # ---------- 1. Site létrehozás (csak ha még nincs) ----------
         if [ ! -f "sites/$$SITE_NAME/site_config.json" ]; then
-          echo ">>> Új site létrehozása és ERPNext telepítése: $$SITE_NAME"
+          echo ">>> Uj site letrehozasa: $$SITE_NAME"
           bench new-site "$$SITE_NAME" \
             --mariadb-user-host-login-scope='%' \
             --db-root-username=root \
@@ -99,49 +158,90 @@ services:
             --install-app erpnext \
             --set-default
         else
-          echo ">>> A site már létezik: $$SITE_NAME (létrehozás kihagyva)"
+          echo ">>> A site mar letezik: $$SITE_NAME"
+
+          # ---------- 2. KOTELEZO MENTES a migrate elott ----------
+          # Csak adatbazis (--with-files nelkul): gyors, es a semaval
+          # kapcsolatos visszagurítashoz csak ez kell.
+          echo ">>> Biztonsagi mentes a migrate elott..."
+          bench --site "$$SITE_NAME" backup
+          echo ">>> Mentes kesz."
         fi
 
-        echo ">>> Hiányzó appok telepítése"
-        INSTALLED=$$(bench --site "$$SITE_NAME" list-apps 2>/dev/null || true)
-        for app in hrms helpdesk insights builder wiki lms gameplan print_designer crm; do
-          if echo "$$INSTALLED" | grep -qw "$$app"; then
-            echo "  - $$app: már telepítve, kihagyás"
+        # ---------- 3. Hianyzo appok telepitese ----------
+        echo ">>> Hianyzo appok telepitese"
+        INSTALLED=$$(bench --site "$$SITE_NAME" list-apps 2>/dev/null | awk '{print $$1}')
+        for app in $$APPS; do
+          if echo "$$INSTALLED" | grep -qx "$$app"; then
+            echo "  - $$app: mar telepitve"
           else
-            echo "  - $$app: telepítés..."
-            bench --site "$$SITE_NAME" install-app "$$app" || echo "  ! $$app telepítés sikertelen, folytatás"
+            echo "  - $$app: telepites..."
+            # NINCS '|| echo'. Ha elhasal, a konteneret megallitjuk,
+            # es a backend el sem indul. Ez SZANDEKOS.
+            bench --site "$$SITE_NAME" install-app "$$app"
           fi
         done
 
-        echo ">>> Migráció futtatása"
-        bench --site "$$SITE_NAME" migrate
-        echo ">>> Kész."
-    environment:
-      SITE_NAME: ${SITE_NAME}
-      ROOT_PASS: ${DB_PASSWORD}
-      ADMIN_PASS: ${ADMIN_PASSWORD}
-    volumes:
-      - ${SITES_DIR:-./data/sites}:/home/frappe/frappe-bench/sites
-      - ${LOGS_DIR:-./data/logs}:/home/frappe/frappe-bench/logs
+        # ---------- 4. Telepites-ellenorzes ----------
+        # Ez fogta volna el az lms-esetet az elso napon.
+        echo ">>> Telepites ellenorzese"
+        INSTALLED=$$(bench --site "$$SITE_NAME" list-apps 2>/dev/null | awk '{print $$1}')
+        HIANYZO=""
+        for app in $$APPS; do
+          echo "$$INSTALLED" | grep -qx "$$app" || HIANYZO="$$HIANYZO $$app"
+        done
+        if [ -n "$$HIANYZO" ]; then
+          echo "!!! HIBA: a kovetkezo appok NEM telepultek:$$HIANYZO"
+          exit 1
+        fi
+        echo ">>> Minden app telepitve."
 
+        # ---------- 5. Migracio ----------
+        echo ">>> Migracio futtatasa"
+        bench --site "$$SITE_NAME" migrate
+        echo ">>> Kesz."
+    environment:
+      SITE_NAME: ${SITE_NAME:?}
+      ROOT_PASS: ${DB_PASSWORD:?}
+      ADMIN_PASS: ${ADMIN_PASSWORD:?}
+    volumes:
+      - ${SITES_DIR:?}:/home/frappe/frappe-bench/sites
+      - ${LOGS_DIR:?}:/home/frappe/frappe-bench/logs
+      - ${BACKUPS_DIR:?}:/home/frappe/frappe-bench/sites/${SITE_NAME}/private/backups
+
+  # -------------------------------------------------------------------
   backend:
     <<: *image
+    container_name: frappe-backend
+    networks: [hegyesihq_network]
     restart: unless-stopped
     depends_on:
       create-site:
         condition: service_completed_successfully
+    healthcheck:
+      # Csak TCP-kapcsolat: nem tud hamis hibat adni auth vagy
+      # host-header miatt, de eszreveszi, ha a gunicorn leallt.
+      test: ["CMD-SHELL", "python -c \"import socket;socket.create_connection(('127.0.0.1',8000),3)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
     environment:
       GUNICORN_WORKERS: ${GUNICORN_WORKERS:-4}
       GUNICORN_THREADS: ${GUNICORN_THREADS:-4}
       GUNICORN_TIMEOUT: ${GUNICORN_TIMEOUT:-120}
     volumes:
-      - ${SITES_DIR:-./data/sites}:/home/frappe/frappe-bench/sites
-      - ${LOGS_DIR:-./data/logs}:/home/frappe/frappe-bench/logs
-      - ${UPLOADS_PUBLIC_DIR:-./data/uploads/public}:/home/frappe/frappe-bench/sites/${SITE_NAME}/public/files
-      - ${UPLOADS_PRIVATE_DIR:-./data/uploads/private}:/home/frappe/frappe-bench/sites/${SITE_NAME}/private/files
+      - ${SITES_DIR:?}:/home/frappe/frappe-bench/sites
+      - ${LOGS_DIR:?}:/home/frappe/frappe-bench/logs
+      - ${UPLOADS_PUBLIC_DIR:?}:/home/frappe/frappe-bench/sites/${SITE_NAME}/public/files
+      - ${UPLOADS_PRIVATE_DIR:?}:/home/frappe/frappe-bench/sites/${SITE_NAME}/private/files
+      - ${BACKUPS_DIR:?}:/home/frappe/frappe-bench/sites/${SITE_NAME}/private/backups
 
+  # -------------------------------------------------------------------
   websocket:
     <<: *image
+    container_name: frappe-websocket
+    networks: [hegyesihq_network]
     restart: unless-stopped
     depends_on:
       create-site:
@@ -149,70 +249,100 @@ services:
     command:
       - node
       - /home/frappe/frappe-bench/apps/frappe/socketio.js
-    volumes:
-      - ${SITES_DIR:-./data/sites}:/home/frappe/frappe-bench/sites
-      - ${LOGS_DIR:-./data/logs}:/home/frappe/frappe-bench/logs
+    # A socketio nem szolgal ki fajlokat -> nem kell uploads/backups mount.
+    volumes: *sites-logs
 
+  # -------------------------------------------------------------------
   frontend:
     <<: *image
+    container_name: frappe-frontend
+    networks: [hegyesihq_network]
     restart: unless-stopped
     depends_on:
-      - backend
-      - websocket
+      backend:
+        condition: service_healthy
+      websocket:
+        condition: service_started
     command:
       - nginx-entrypoint.sh
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket;socket.create_connection(('127.0.0.1',8080),3)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     environment:
       BACKEND: backend:8000
-      FRAPPE_SITE_NAME_HEADER: ${SITE_NAME}
+      FRAPPE_SITE_NAME_HEADER: ${SITE_NAME:?}
       SOCKETIO: websocket:9000
-      UPSTREAM_REAL_IP_ADDRESS: 127.0.0.1
+      # A valodi kliens-IP forrasa. NPM -> host:1701 -> docker-proxy
+      # eseten ez a hegyesihq_network atjaroja (172.26.0.1).
+      UPSTREAM_REAL_IP_ADDRESS: ${UPSTREAM_REAL_IP_ADDRESS:?}
       UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
       UPSTREAM_REAL_IP_RECURSIVE: "off"
       PROXY_READ_TIMEOUT: "120"
       CLIENT_MAX_BODY_SIZE: ${CLIENT_MAX_BODY_SIZE:-100m}
     volumes:
-      - ${SITES_DIR:-./data/sites}:/home/frappe/frappe-bench/sites
-      - ${LOGS_DIR:-./data/logs}:/home/frappe/frappe-bench/logs
-      - ${UPLOADS_PUBLIC_DIR:-./data/uploads/public}:/home/frappe/frappe-bench/sites/${SITE_NAME}/public/files
-      - ${UPLOADS_PRIVATE_DIR:-./data/uploads/private}:/home/frappe/frappe-bench/sites/${SITE_NAME}/private/files
+      - ${SITES_DIR:?}:/home/frappe/frappe-bench/sites
+      - ${LOGS_DIR:?}:/home/frappe/frappe-bench/logs
+      - ${UPLOADS_PUBLIC_DIR:?}:/home/frappe/frappe-bench/sites/${SITE_NAME}/public/files
+      - ${UPLOADS_PRIVATE_DIR:?}:/home/frappe/frappe-bench/sites/${SITE_NAME}/private/files
+    # ------------------------------------------------------------------
+    # B VALTOZAT eseten (NPM a hegyesihq_network-on, kozvetlen proxy a
+    # frappe-frontend:8080 cimre) ezt a teljes blokkot torold, es allitsd
+    # az UPSTREAM_REAL_IP_ADDRESS-t az NPM konteneer IP-jere / alhalozatara.
     ports:
-      - "${HTTP_PORT:-8080}:8080"
+      - "${HTTP_PORT:-1701}:8080"
 
+  # -------------------------------------------------------------------
   queue-long:
     <<: *image
+    container_name: frappe-queue-long
+    networks: [hegyesihq_network]
     restart: unless-stopped
     depends_on:
       create-site:
         condition: service_completed_successfully
     command: ["bench", "worker", "--queue", "long,default,short"]
     volumes:
-      - ${SITES_DIR:-./data/sites}:/home/frappe/frappe-bench/sites
-      - ${LOGS_DIR:-./data/logs}:/home/frappe/frappe-bench/logs
-      - ${UPLOADS_PUBLIC_DIR:-./data/uploads/public}:/home/frappe/frappe-bench/sites/${SITE_NAME}/public/files
-      - ${UPLOADS_PRIVATE_DIR:-./data/uploads/private}:/home/frappe/frappe-bench/sites/${SITE_NAME}/private/files
+      - ${SITES_DIR:?}:/home/frappe/frappe-bench/sites
+      - ${LOGS_DIR:?}:/home/frappe/frappe-bench/logs
+      - ${UPLOADS_PUBLIC_DIR:?}:/home/frappe/frappe-bench/sites/${SITE_NAME}/public/files
+      - ${UPLOADS_PRIVATE_DIR:?}:/home/frappe/frappe-bench/sites/${SITE_NAME}/private/files
+      - ${BACKUPS_DIR:?}:/home/frappe/frappe-bench/sites/${SITE_NAME}/private/backups
 
   queue-short:
     <<: *image
+    container_name: frappe-queue-short
+    networks: [hegyesihq_network]
     restart: unless-stopped
     depends_on:
       create-site:
         condition: service_completed_successfully
     command: ["bench", "worker", "--queue", "short,default"]
     volumes:
-      - ${SITES_DIR:-./data/sites}:/home/frappe/frappe-bench/sites
-      - ${LOGS_DIR:-./data/logs}:/home/frappe/frappe-bench/logs
-      - ${UPLOADS_PUBLIC_DIR:-./data/uploads/public}:/home/frappe/frappe-bench/sites/${SITE_NAME}/public/files
-      - ${UPLOADS_PRIVATE_DIR:-./data/uploads/private}:/home/frappe/frappe-bench/sites/${SITE_NAME}/private/files
+      - ${SITES_DIR:?}:/home/frappe/frappe-bench/sites
+      - ${LOGS_DIR:?}:/home/frappe/frappe-bench/logs
+      - ${UPLOADS_PUBLIC_DIR:?}:/home/frappe/frappe-bench/sites/${SITE_NAME}/public/files
+      - ${UPLOADS_PRIVATE_DIR:?}:/home/frappe/frappe-bench/sites/${SITE_NAME}/private/files
+      - ${BACKUPS_DIR:?}:/home/frappe/frappe-bench/sites/${SITE_NAME}/private/backups
 
   scheduler:
     <<: *image
+    container_name: frappe-scheduler
+    networks: [hegyesihq_network]
     restart: unless-stopped
     depends_on:
       create-site:
         condition: service_completed_successfully
     command: ["bench", "schedule"]
     volumes:
-      - ${SITES_DIR:-./data/sites}:/home/frappe/frappe-bench/sites
-      - ${LOGS_DIR:-./data/logs}:/home/frappe/frappe-bench/logs
-      - ${UPLOADS_PUBLIC_DIR:-./data/uploads/public}:/home/frappe/frappe-bench/sites/${SITE_NAME}/public/files
-      - ${UPLOADS_PRIVATE_DIR:-./data/uploads/private}:/home/frappe/frappe-bench/sites/${SITE_NAME}/private/files
+      - ${SITES_DIR:?}:/home/frappe/frappe-bench/sites
+      - ${LOGS_DIR:?}:/home/frappe/frappe-bench/logs
+      - ${UPLOADS_PUBLIC_DIR:?}:/home/frappe/frappe-bench/sites/${SITE_NAME}/public/files
+      - ${UPLOADS_PRIVATE_DIR:?}:/home/frappe/frappe-bench/sites/${SITE_NAME}/private/files
+      - ${BACKUPS_DIR:?}:/home/frappe/frappe-bench/sites/${SITE_NAME}/private/backups
+
+networks:
+  hegyesihq_network:
+    external: true
