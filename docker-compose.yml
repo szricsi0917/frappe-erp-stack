@@ -112,6 +112,7 @@ services:
         bench set-config -g redis_socketio "redis://$$REDIS_QUEUE";
         bench set-config -gp socketio_port $$SOCKETIO_PORT;
         bench set-config -g chromium_path /usr/bin/chromium-headless-shell;
+        bench set-config -gp keep_backups_for_hours $$KEEP_BACKUPS_FOR_HOURS;
         echo ">>> Konfiguracio kesz.";
     environment:
       DB_HOST: db
