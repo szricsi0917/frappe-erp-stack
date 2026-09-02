@@ -65,6 +65,12 @@ services:
     container_name: frappe-redis-cache
     networks: [hegyesihq_network]
     restart: unless-stopped
+    command: >
+      redis-server
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --save ""
+      --appendonly no
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
