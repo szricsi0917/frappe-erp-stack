@@ -51,6 +51,11 @@ services:
       - --collation-server=utf8mb4_unicode_ci
       - --skip-character-set-client-handshake
       - --innodb-buffer-pool-size=${INNODB_BUFFER_POOL_SIZE:-2G}
+      - --log-bin=/var/lib/mysql-binlog/binlog
+      - --binlog-format=ROW
+      - --max-binlog-size=268435456
+      - --binlog-expire-logs-seconds=1296000
+      - --sync-binlog=1      
     environment:
       MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:?}
       MARIADB_ROOT_PASSWORD: ${DB_PASSWORD:?}
@@ -58,7 +63,8 @@ services:
       MARIADB_AUTO_UPGRADE: "1"
     volumes:
       - ${DB_DIR:?}:/var/lib/mysql
-
+      - ${DB_BINLOG_DIR:?}:/var/lib/mysql-binlog
+      
   # -------------------------------------------------------------------
   redis-cache:
     image: redis:${REDIS_TAG:-7.4-alpine}
