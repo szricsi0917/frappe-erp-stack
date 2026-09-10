@@ -12,7 +12,6 @@ on:
 #  Automatikus heti rebuild - SZANDEKOSAN kikapcsolva.
 #  Production ERP-nel a rebuild legyen tudatos dontes, ne utemezett,
 #  mert a develop agas appok tipje barmikor valtozhat.
-#  Ha vissza akarod kapcsolni, elobb legyen mukodo staging.
 # ---------------------------------------------------------------------
 #  schedule:
 #    - cron: '0 3 * * 0'
@@ -21,11 +20,19 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
-  # A frappe_docker referencia is MOZGO, ha 'main'-en hagyod: a
-  # Containerfile viselkedese valtozhat ket build kozott. Reprodukalhato
-  # buildhez rogzitsd egy konkret commitra.
-  # SHA-k: https://github.com/frappe/frappe_docker/commits/main
-  FRAPPE_DOCKER_REF: main
+  # ---------------------------------------------------------------------
+  #  VALTOZAS (F0.3): rogzitett referencia.
+  #  'main' eseten ket build ugyanabbol az apps.json-bol KULONBOZO image-et
+  #  adhat, ha kozben a Containerfile valtozott -> egy eles hiba nem
+  #  vezetheto vissza. A SHA forrasa:
+  #    https://github.com/frappe/frappe_docker/commits/main
+  #  Frissiteskor tudatos dontes: uj SHA + uj build + PROBA telepites.
+  # ---------------------------------------------------------------------
+  FRAPPE_DOCKER_REF: a0c52135d4d41c4b8acf7adfdfc5bbcba46dd4d0
+
+  # Az alap image SOHA nem tartalmazhatja ezt az appot.
+  # Reszletes indoklas a "Guard" lepesnel.
+  TILTOTT_APP: hegyesihq
 
 jobs:
   build:
@@ -40,14 +47,8 @@ jobs:
 
       # -----------------------------------------------------------------
       #  Egyedi, VISSZAGURITHATO tag eloallitasa.
-      #
       #  Formatum:  v16-<datum>-<rovid_sha>-<run_number>
-      #  Pl.:       v16-20260828-a1b2c3d-42
-      #
-      #  Miert nem eleg a github.sha?  Mert a workflow_dispatch ugyanazt a
-      #  commitot UJRA tudja buildelni, ekkor felulirna a :<sha> taget egy
-      #  masik tartalmu image-dzsel (frissebb develop tip). A run_number
-      #  minden futasnal no -> minden build EGYEDI, felulirhatatlan tag.
+      #  A run_number miatt minden build egyedi -> felulirhatatlan.
       # -----------------------------------------------------------------
       - name: Compute image tag
         id: meta
@@ -75,64 +76,49 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push image
+      # =================================================================
+      #  1. EPITES - PUSH NELKUL
+      #
+      #  VALTOZAS (F0.3): korabban itt "push: true" allt, es az ellenorzes
+      #  utana futott. Egy leak-vedelem, ami a leak UTAN fut le, nem
+      #  vedelem: ami egyszer publikus registrybe kerult, azt lehuzhattak.
+      #  Ezert az image eloszor CSAK a futtato gepre toltodik (load: true),
+      #  ott fut minden ellenorzes, es csak utana megy a push.
+      # =================================================================
+      - name: Build image (push nelkul)
         uses: docker/build-push-action@v6
         with:
           context: frappe_docker
           file: frappe_docker/images/layered/Containerfile
-          push: true
+          push: false
+          load: true
           platforms: linux/amd64
-          # ---------------------------------------------------------------
-          #  Tagek:
-          #   - unique_tag : EZ a visszaguritas alapja. A stack .env-je ezt
-          #                  hasznalja. Felulirhatatlan.
-          #   - v16        : mozgo "legfrissebb v16" mutato, KENYELEMBOL.
-          #                  A stack SOHA ne erre mutasson.
-          #
-          #  Torolve a korabbi ':latest' (veszelyes: a docker pull/run
-          #  alapertelmezett celpontja) es a ':<sha>' (a unique_tag ugyis
-          #  tartalmazza a sha-t, es a run_number egyedive teszi).
-          # ---------------------------------------------------------------
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.unique_tag }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v16
-          # ---------------------------------------------------------------
-          #  A PYTHON_VERSION / NODE_VERSION argok TOROLVE.
-          #  A layered Containerfile ezeket NEM hasznalja - a verziok a
-          #  version-16 base image-bol jonnek (jelenleg Python 3.14 / Node 24).
-          #  A korabbi 3.11.6 / 20.19.2 no-op volt es felrevezetett.
-          # ---------------------------------------------------------------
+          tags: local/frappe-erp-stack:build
           build-args: |
             FRAPPE_PATH=https://github.com/frappe/frappe
             FRAPPE_BRANCH=version-16
-          # A secret-files (nem build-arg) a biztonsagos minta: az apps.json
-          # tartalma nem kerul be az image reteg-metaadatba. Ez jol volt.
+          # Az apps.json tartalma NEM kerul be az image reteg-metaadatba.
           secret-files: |
             apps_json=${{ github.workspace }}/apps.json
+          # VALTOZAS (F0.3): a cache eddig irva volt, de SOSEM olvasva.
+          # A cache-from nelkul minden build nullarol indult.
+          cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # -----------------------------------------------------------------
-      #  BUILD-IDEJU ELLENORZES.
-      #
-      #  Ez a build-oldali parja a create-site ellenorzesnek. Ha egy app
-      #  kimaradt az image-bol (pl. hianyzo fuggoseg, mint anno az lms ->
-      #  payments), a build ITT elhasal, nem elesben derul ki.
-      # -----------------------------------------------------------------
-      - name: Verify apps are present in image
+      # =================================================================
+      #  2. ELLENORZESEK - meg a push elott
+      # =================================================================
+      - name: Az appok listaja az image-ben
+        id: apps
         run: |
-          IMG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.unique_tag }}"
-          echo ">>> Image lehuzasa ellenorzeshez: $IMG"
-          docker pull "$IMG"
-
-          echo ">>> Az image apps/ konyvtaranak tartalma:"
-          docker run --rm --entrypoint bash "$IMG" \
+          docker run --rm --entrypoint bash local/frappe-erp-stack:build \
             -c "ls -1 /home/frappe/frappe-bench/apps/" | tee /tmp/apps_in_image.txt
 
+      - name: Minden elvart app benne van-e
+        run: |
           # Elvart appok = frappe (build-arg) + minden apps.json bejegyzes
-          # (a repo-nev az URL utolso szegmense, .git nelkul).
           EXPECTED="frappe $(jq -r '.[].url' apps.json | sed 's#.*/##; s#\.git$##')"
 
-          echo ">>> Elvart appok ellenorzese:"
           MISSING=""
           for app in $EXPECTED; do
             if grep -qx "$app" /tmp/apps_in_image.txt; then
@@ -150,4 +136,53 @@ jobs:
             exit 1
           fi
           echo ""
-          echo ">>> OK: minden elvart app benne van az image-ben."
+          echo ">>> OK: minden elvart app benne van."
+
+      # -----------------------------------------------------------------
+      #  ORSZEM: sajat appkod nem kerulhet a publikus alap image-be.
+      #
+      #  A kepletet ketto image alkotja:
+      #    - ALAP image  (ez): csak upstream, nyilt forrasu kod -> GHCR,
+      #      publikus lehet, mert nincs benne semmi sajat.
+      #    - APP-RETEG (helyben, az Unraiden): a hegyesihq app -> SEHOVA
+      #      nem kerul fel.
+      #
+      #  Ez az ellenorzes tartja fenn a hatarvonalat. Ha valaha az apps.json
+      #  vagy a Containerfile ugy valtozna, hogy a sajat app is beepulne,
+      #  a build ITT all meg - a push elott.
+      # -----------------------------------------------------------------
+      - name: Guard - a sajat app NEM lehet az alap image-ben
+        run: |
+          if grep -qx "${{ env.TILTOTT_APP }}" /tmp/apps_in_image.txt; then
+            echo "!!! BLOKKOLO: a '${{ env.TILTOTT_APP }}' app bekerult az ALAP image-be."
+            echo "!!! Ez az image PUBLIKUS registrybe menne -> az uzleti logika kiszivarogna."
+            echo "!!! A build leall, push NEM tortenik."
+            exit 1
+          fi
+          echo ">>> OK: a '${{ env.TILTOTT_APP }}' nincs az alap image-ben."
+
+      # =================================================================
+      #  3. PUSH - csak sikeres ellenorzes utan
+      #
+      #  Nem uj buildet inditunk, hanem a mar ellenorzott, helyi image-et
+      #  cimkezzuk es toljuk fel. Igy garantalt, hogy PONTOSAN az kerul
+      #  fel, amit ellenoriztunk.
+      # =================================================================
+      - name: Tag es push
+        run: |
+          LOCAL="local/frappe-erp-stack:build"
+          UNIQUE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.unique_tag }}"
+          MOVING="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v16"
+
+          # unique : EZ a visszaguritas alapja, a stack .env-je ezt hasznalja
+          # v16    : mozgo "legfrissebb" mutato, KENYELEMBOL. A stack SOHA
+          #          ne erre mutasson.
+          docker tag "$LOCAL" "$UNIQUE"
+          docker tag "$LOCAL" "$MOVING"
+
+          docker push "$UNIQUE"
+          docker push "$MOVING"
+
+          echo ""
+          echo ">>> Feltoltve: $UNIQUE"
+          echo ">>> Ezt az erteket ird a stack .env-jebe TAG-kent."
