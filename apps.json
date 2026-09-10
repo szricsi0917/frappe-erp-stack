@@ -13,23 +13,23 @@
   },
   {
     "url": "https://github.com/frappe/helpdesk",
-    "branch": "main"
+    "branch": "v1.29.0"
   },
   {
     "url": "https://github.com/frappe/insights",
-    "branch": "develop"
+    "branch": "version-3"
   },
   {
     "url": "https://github.com/frappe/builder",
-    "branch": "develop"
+    "branch": "1.0.0-dev"
   },
   {
     "url": "https://github.com/frappe/wiki",
-    "branch": "develop"
+    "branch": "v3.0.0"
   },
   {
     "url": "https://github.com/frappe/payments",
-    "branch": "develop"
+    "branch": "version-16"
   },
   {
     "url": "https://github.com/frappe/lms",
@@ -41,10 +41,10 @@
   },
   {
     "url": "https://github.com/frappe/print_designer",
-    "branch": "develop"
+    "branch": "v1.6.5"
   },
   {
     "url": "https://github.com/frappe/crm",
-    "branch": "develop"
+    "branch": "2.0.0-dev"
   }
 ]
