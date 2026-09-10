@@ -33,7 +33,7 @@
   },
   {
     "url": "https://github.com/frappe/lms",
-    "branch": "develop"
+    "branch": "v2.45.2"
   },
   {
     "url": "https://github.com/frappe/gameplan",
