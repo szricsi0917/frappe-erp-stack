@@ -1,0 +1,180 @@
+name: App preflight
+
+# =====================================================================
+#  Miert letezik ez a workflow
+# ---------------------------------------------------------------------
+#  A teljes image-build 30-45 perc, es a 12 app frontendjet EGYMAS UTAN
+#  forditja le egyetlen monolit lepesben. Ha a nyolcadik torik el, akkor
+#  is vegigvarod az elozo hetet - es csak EGY hibat latsz belole.
+#
+#  Ez a workflow appononkent egy kulon jobot indit, PARHUZAMOSAN.
+#  A 'fail-fast: false' miatt egy app elhasalasa nem allitja le a tobbit,
+#  tehat EGY korben megtudod, melyik appok rosszak - nem haromban.
+#
+#    Ma:            40 perc -> 1 hiba
+#    Ezzel:         ~8 perc -> az OSSZES hiba
+#
+#  FONTOS: ez FUSTPROBA, nem garancia. Azt a hibaosztalyt reprodukalja,
+#  ami az LMS-t megbuktatta (frontend-forditas), nem a teljes bench init-et.
+#  Ha zold, a teljes build meg mindig elhasalhat Python-fuggosegen -
+#  de a torescek tulnyomo tobbsege a frontendekbol jon.
+#
+#  Hasznalat: apps.json modositasa utan EZT inditsd eloszor.
+#  A teljes buildet csak akkor, ha ez zold.
+# =====================================================================
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps.json'
+      - '.github/workflows/preflight.yml'
+  workflow_dispatch:
+
+jobs:
+
+  # -------------------------------------------------------------------
+  #  1. Az apps.json beolvasasa es matrix-sza alakitasa
+  # -------------------------------------------------------------------
+  lista:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Hivatkozasok ellenorzese
+        run: |
+          echo ">>> Letezik-e minden ag / cimke"
+          HIBA=0
+          while read -r url ref; do
+            if   git ls-remote --exit-code "$url" "refs/heads/$ref" >/dev/null 2>&1; then
+              printf '  OK    ag     %-14s <- %s\n' "$ref" "$url"
+            elif git ls-remote --exit-code "$url" "refs/tags/$ref"  >/dev/null 2>&1; then
+              printf '  OK    cimke  %-14s <- %s\n' "$ref" "$url"
+            else
+              printf '  HIBA         %-14s <- %s  (nincs ilyen ag vagy cimke)\n' "$ref" "$url"
+              HIBA=1
+            fi
+          done < <(jq -r '.[] | "\(.url) \(.branch)"' apps.json)
+
+          echo ""
+          echo ">>> Orszem: a sajat app nem lehet az alap image-ben"
+          if jq -r '.[].url' apps.json | grep -qi '/hegyesihq\(\.git\)\?$'; then
+            echo "  !!! BLOKKOLO: a 'hegyesihq' szerepel az apps.json-ban."
+            echo "  !!! Az alap image PUBLIKUS registrybe megy."
+            HIBA=1
+          else
+            echo "  OK    a 'hegyesihq' nincs az apps.json-ban"
+          fi
+
+          [ "$HIBA" -eq 0 ] || { echo ""; echo "!!! Javitsd az apps.json-t."; exit 1; }
+
+      - name: Matrix eloallitasa
+        id: gen
+        run: |
+          M=$(jq -c '[.[] | {name: (.url | split("/") | last | sub("\\.git$";"")), url: .url, ref: .branch}]' apps.json)
+          echo "matrix=$M" >> "$GITHUB_OUTPUT"
+          echo "$M" | jq -r '.[] | "  - \(.name) @ \(.ref)"'
+
+  # -------------------------------------------------------------------
+  #  2. Appononkent egy job, PARHUZAMOSAN
+  # -------------------------------------------------------------------
+  app:
+    needs: lista
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      # EZ A LENYEG: egy app elhasalasa nem allitja le a tobbit.
+      fail-fast: false
+      matrix:
+        app: ${{ fromJson(needs.lista.outputs.matrix) }}
+
+    name: ${{ matrix.app.name }} @ ${{ matrix.app.ref }}
+
+    steps:
+      - name: Lehuzas
+        run: |
+          git clone --depth 1 --branch "${{ matrix.app.ref }}" \
+            "${{ matrix.app.url }}" app
+          cd app
+          echo ">>> Commit: $(git rev-parse --short HEAD)"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Frontendek keresese
+        id: fe
+        run: |
+          # A frappe appok frontendje valtozo helyen van (frontend/, desk/,
+          # dashboard/ ...). Ezert nem tippelunk: megkeressuk a package.json
+          # fajlokat, es kizarjuk a node_modules-t.
+          FOUND=$(find app -maxdepth 3 -name package.json \
+                    -not -path '*/node_modules/*' | sort)
+          if [ -z "$FOUND" ]; then
+            echo "  Nincs frontend ebben az appban - a fustproba itt veget er."
+            echo "van=0" >> "$GITHUB_OUTPUT"
+          else
+            echo "$FOUND" | sed 's/^/  /'
+            echo "van=1" >> "$GITHUB_OUTPUT"
+            echo "$FOUND" > /tmp/fe.txt
+          fi
+
+      - name: Frontendek forditasa
+        if: steps.fe.outputs.van == '1'
+        run: |
+          HIBA=0
+          while read -r pkg; do
+            DIR=$(dirname "$pkg")
+            echo ""
+            echo "=============================================="
+            echo ">>> $DIR"
+            echo "=============================================="
+
+            # Van-e egyaltalan build script?
+            if ! jq -e '.scripts.build' "$pkg" >/dev/null 2>&1; then
+              echo "  (nincs 'build' script - kihagyva)"
+              continue
+            fi
+
+            cd "$DIR"
+            if [ -f yarn.lock ]; then
+              yarn install --frozen-lockfile || yarn install || { HIBA=1; cd - >/dev/null; continue; }
+              yarn build || HIBA=1
+            else
+              npm ci || npm install || { HIBA=1; cd - >/dev/null; continue; }
+              npm run build || HIBA=1
+            fi
+            cd - >/dev/null
+          done < /tmp/fe.txt
+
+          if [ "$HIBA" -ne 0 ]; then
+            echo ""
+            echo "!!! A(z) ${{ matrix.app.name }} app frontendje NEM fordul le"
+            echo "!!! a(z) '${{ matrix.app.ref }}' verzion."
+            echo "!!! Valassz masik verziot, vagy vedd ki az apps.json-bol."
+            exit 1
+          fi
+          echo ""
+          echo ">>> OK: a(z) ${{ matrix.app.name }} rendben."
+
+  # -------------------------------------------------------------------
+  #  3. Osszegzes
+  # -------------------------------------------------------------------
+  osszegzes:
+    needs: app
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Eredmeny
+        run: |
+          if [ "${{ needs.app.result }}" = "success" ]; then
+            echo ">>> MINDEN APP RENDBEN."
+            echo ">>> Indithatod a teljes buildet (Build and Push Image)."
+          else
+            echo "!!! Legalabb egy app elhasalt."
+            echo "!!! Gorgess fel: a PIROS jobok neveben ott az app es a verzio."
+            echo "!!! Javitsd MINDET egyszerre, aztan inditsd ujra ezt a workflow-t."
+            exit 1
+          fi
