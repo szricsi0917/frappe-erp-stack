@@ -17,19 +17,19 @@
   },
   {
     "url": "https://github.com/frappe/insights",
-    "branch": "version-3"
+    "branch": "develop"
   },
   {
     "url": "https://github.com/frappe/builder",
-    "branch": "1.0.0-dev"
+    "branch": "develop"
   },
   {
     "url": "https://github.com/frappe/wiki",
-    "branch": "v3.0.0"
+    "branch": "develop"
   },
   {
     "url": "https://github.com/frappe/payments",
-    "branch": "version-16"
+    "branch": "develop"
   },
   {
     "url": "https://github.com/frappe/lms",
@@ -45,6 +45,6 @@
   },
   {
     "url": "https://github.com/frappe/crm",
-    "branch": "2.0.0-dev"
+    "branch": "develop"
   }
 ]
