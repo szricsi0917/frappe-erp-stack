@@ -28,7 +28,7 @@ env:
   #    https://github.com/frappe/frappe_docker/commits/main
   #  Frissiteskor tudatos dontes: uj SHA + uj build + PROBA telepites.
   # ---------------------------------------------------------------------
-  FRAPPE_DOCKER_REF: IDE_JON_A_COMMIT_SHA
+  FRAPPE_DOCKER_REF: a0c52135d4d41c4b8acf7adfdfc5bbcba46dd4d0
 
   # Az alap image SOHA nem tartalmazhatja ezt az appot.
   # Reszletes indoklas a "Guard" lepesnel.
