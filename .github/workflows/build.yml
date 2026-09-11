@@ -6,32 +6,18 @@ on:
     paths:
       - 'apps.json'
       - '.github/workflows/build.yml'
-  workflow_dispatch:        # kezi inditas az "Actions" fulrol
-
-# ---------------------------------------------------------------------
-#  Automatikus heti rebuild - SZANDEKOSAN kikapcsolva.
-#  Production ERP-nel a rebuild legyen tudatos dontes, ne utemezett,
-#  mert a develop agas appok tipje barmikor valtozhat.
-# ---------------------------------------------------------------------
-#  schedule:
-#    - cron: '0 3 * * 0'
+  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
-  # ---------------------------------------------------------------------
-  #  VALTOZAS (F0.3): rogzitett referencia.
-  #  'main' eseten ket build ugyanabbol az apps.json-bol KULONBOZO image-et
-  #  adhat, ha kozben a Containerfile valtozott -> egy eles hiba nem
-  #  vezetheto vissza. A SHA forrasa:
-  #    https://github.com/frappe/frappe_docker/commits/main
-  #  Frissiteskor tudatos dontes: uj SHA + uj build + PROBA telepites.
-  # ---------------------------------------------------------------------
+  # Rogzitett referencia. 'main' eseten ket build ugyanabbol az apps.json-bol
+  # KULONBOZO image-et adhat, ha kozben a Containerfile valtozott.
+  # SHA forrasa: https://github.com/frappe/frappe_docker/commits/main
   FRAPPE_DOCKER_REF: a0c52135d4d41c4b8acf7adfdfc5bbcba46dd4d0
 
   # Az alap image SOHA nem tartalmazhatja ezt az appot.
-  # Reszletes indoklas a "Guard" lepesnel.
   TILTOTT_APP: hegyesihq
 
 jobs:
@@ -45,9 +31,51 @@ jobs:
       - name: Checkout this repo
         uses: actions/checkout@v4
 
+      # =================================================================
+      #  ELLENORZES A BUILD ELOTT  (~1 masodperc)
+      #
+      #  Ez a lepes azert letezik, mert egy elgepelt agnev korabban 40 perc
+      #  utan derult ki. Itt 1 masodperc alatt derul ki.
+      #
+      #  Ket dolgot ellenoriz:
+      #   1. Minden apps.json hivatkozas letezik-e (ag VAGY cimke)
+      #   2. A sajat appunk NINCS-E benne  <- ez a leak-vedelem valodi
+      #      kockazatot fedo resze: a realis hibaut az, hogy valaki
+      #      beirja az apps.json-ba. Az alap image PUBLIKUS registrybe
+      #      megy, tehat oda sajat kod nem kerulhet.
+      # =================================================================
+      - name: apps.json ellenorzese
+        run: |
+          echo ">>> Hivatkozasok ellenorzese"
+          HIBA=0
+          while read -r url ref; do
+            if   git ls-remote --exit-code "$url" "refs/heads/$ref" >/dev/null 2>&1; then
+              printf '  OK    ag     %-14s <- %s\n' "$ref" "$url"
+            elif git ls-remote --exit-code "$url" "refs/tags/$ref"  >/dev/null 2>&1; then
+              printf '  OK    cimke  %-14s <- %s\n' "$ref" "$url"
+            else
+              printf '  HIBA         %-14s <- %s  (nincs ilyen ag vagy cimke)\n' "$ref" "$url"
+              HIBA=1
+            fi
+          done < <(jq -r '.[] | "\(.url) \(.branch)"' apps.json)
+
+          echo ""
+          echo ">>> Orszem: a sajat app nem lehet az alap image-ben"
+          if jq -r '.[].url' apps.json | grep -qi "/${TILTOTT_APP}\(\.git\)\?$"; then
+            echo "  !!! BLOKKOLO: a '${TILTOTT_APP}' szerepel az apps.json-ban."
+            echo "  !!! Ez az image PUBLIKUS registrybe menne -> az uzleti logika kiszivarogna."
+            echo "  !!! A sajat app kizarolag a helyi app-reteg image-be kerulhet."
+            HIBA=1
+          else
+            echo "  OK    a '${TILTOTT_APP}' nincs az apps.json-ban"
+          fi
+
+          [ "$HIBA" -eq 0 ] || { echo ""; echo "!!! A build el sem indul."; exit 1; }
+          echo ""
+          echo ">>> Minden rendben, indulhat a build."
+
       # -----------------------------------------------------------------
-      #  Egyedi, VISSZAGURITHATO tag eloallitasa.
-      #  Formatum:  v16-<datum>-<rovid_sha>-<run_number>
+      #  Egyedi, VISSZAGURITHATO tag.  v16-<datum>-<rovid_sha>-<run_number>
       #  A run_number miatt minden build egyedi -> felulirhatatlan.
       # -----------------------------------------------------------------
       - name: Compute image tag
@@ -77,48 +105,52 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       # =================================================================
-      #  1. EPITES - PUSH NELKUL
+      #  BUILD + PUSH
       #
-      #  VALTOZAS (F0.3): korabban itt "push: true" allt, es az ellenorzes
-      #  utana futott. Egy leak-vedelem, ami a leak UTAN fut le, nem
-      #  vedelem: ami egyszer publikus registrybe kerult, azt lehuzhattak.
-      #  Ezert az image eloszor CSAK a futtato gepre toltodik (load: true),
-      #  ott fut minden ellenorzes, es csak utana megy a push.
+      #  push: true  -> a buildx a retegeket KOZVETLENUL a registrybe tolja,
+      #  parhuzamosan. A korabbi "load: true" ehelyett tarball-kent
+      #  exportalta a 4-6 GB-os image-et, visszaimportalta a Docker
+      #  demonba, es csak utana toltotte fel: 10-20 perc plusz.
+      #
+      #  Csak az EGYEDI tag kerul fel. A mozgo ':v16' mutato CSAK sikeres
+      #  ellenorzes utan, kulon lepesben.
+      #
+      #  cache mode=min: a Containerfile lenyegeben egyetlen nagy RUN
+      #  lepes, ezert a 'max' szinte semmit nem gyorsit, viszont sok
+      #  gigabajtot exportal a GitHub cache-be (repnkent 10 GB a korlat).
       # =================================================================
-      - name: Build image (push nelkul)
+      - name: Build and push (egyedi tag)
         uses: docker/build-push-action@v6
         with:
           context: frappe_docker
           file: frappe_docker/images/layered/Containerfile
-          push: false
-          load: true
+          push: true
           platforms: linux/amd64
-          tags: local/frappe-erp-stack:build
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.unique_tag }}
           build-args: |
             FRAPPE_PATH=https://github.com/frappe/frappe
             FRAPPE_BRANCH=version-16
           # Az apps.json tartalma NEM kerul be az image reteg-metaadatba.
           secret-files: |
             apps_json=${{ github.workspace }}/apps.json
-          # VALTOZAS (F0.3): a cache eddig irva volt, de SOSEM olvasva.
-          # A cache-from nelkul minden build nullarol indult.
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min
 
       # =================================================================
-      #  2. ELLENORZESEK - meg a push elott
+      #  ELLENORZES A KESZ IMAGE-EN
+      #  Ez a lepes azt fogja el, ha egy app kimaradt (pl. hianyzo
+      #  fuggoseg, mint anno az lms -> payments). Egyben azt is bizonyitja,
+      #  hogy a feltoltott image tenylegesen hasznalhato.
       # =================================================================
       - name: Az appok listaja az image-ben
-        id: apps
         run: |
-          docker run --rm --entrypoint bash local/frappe-erp-stack:build \
+          IMG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.unique_tag }}"
+          docker run --rm --entrypoint bash "$IMG" \
             -c "ls -1 /home/frappe/frappe-bench/apps/" | tee /tmp/apps_in_image.txt
 
       - name: Minden elvart app benne van-e
         run: |
-          # Elvart appok = frappe (build-arg) + minden apps.json bejegyzes
           EXPECTED="frappe $(jq -r '.[].url' apps.json | sed 's#.*/##; s#\.git$##')"
-
           MISSING=""
           for app in $EXPECTED; do
             if grep -qx "$app" /tmp/apps_in_image.txt; then
@@ -128,61 +160,30 @@ jobs:
               MISSING="$MISSING $app"
             fi
           done
-
           if [ -n "$MISSING" ]; then
             echo ""
-            echo "!!! A build HIBAS: a kovetkezo appok nincsenek az image-ben:$MISSING"
-            echo "!!! Valoszinu ok: hianyzo fuggoseg vagy rossz branch az apps.json-ban."
+            echo "!!! A kovetkezo appok nincsenek az image-ben:$MISSING"
+            echo "!!! A ':v16' mutato NEM kerul at erre az image-re."
             exit 1
           fi
           echo ""
           echo ">>> OK: minden elvart app benne van."
 
-      # -----------------------------------------------------------------
-      #  ORSZEM: sajat appkod nem kerulhet a publikus alap image-be.
-      #
-      #  A kepletet ketto image alkotja:
-      #    - ALAP image  (ez): csak upstream, nyilt forrasu kod -> GHCR,
-      #      publikus lehet, mert nincs benne semmi sajat.
-      #    - APP-RETEG (helyben, az Unraiden): a hegyesihq app -> SEHOVA
-      #      nem kerul fel.
-      #
-      #  Ez az ellenorzes tartja fenn a hatarvonalat. Ha valaha az apps.json
-      #  vagy a Containerfile ugy valtozna, hogy a sajat app is beepulne,
-      #  a build ITT all meg - a push elott.
-      # -----------------------------------------------------------------
-      - name: Guard - a sajat app NEM lehet az alap image-ben
-        run: |
-          if grep -qx "${{ env.TILTOTT_APP }}" /tmp/apps_in_image.txt; then
-            echo "!!! BLOKKOLO: a '${{ env.TILTOTT_APP }}' app bekerult az ALAP image-be."
-            echo "!!! Ez az image PUBLIKUS registrybe menne -> az uzleti logika kiszivarogna."
-            echo "!!! A build leall, push NEM tortenik."
-            exit 1
-          fi
-          echo ">>> OK: a '${{ env.TILTOTT_APP }}' nincs az alap image-ben."
-
       # =================================================================
-      #  3. PUSH - csak sikeres ellenorzes utan
+      #  A MOZGO MUTATO - csak sikeres ellenorzes utan
       #
-      #  Nem uj buildet inditunk, hanem a mar ellenorzott, helyi image-et
-      #  cimkezzuk es toljuk fel. Igy garantalt, hogy PONTOSAN az kerul
-      #  fel, amit ellenoriztunk.
+      #  Az imagetools szerveroldali masolas: nem tolt le es nem tolt fel
+      #  semmit, azonnali. A ':v16' KENYELMI mutato - a stack .env-je
+      #  SOHA ne erre mutasson, hanem az egyedi tagre.
       # =================================================================
-      - name: Tag es push
+      - name: A ':v16' mutato atallitasa
         run: |
-          LOCAL="local/frappe-erp-stack:build"
-          UNIQUE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.unique_tag }}"
-          MOVING="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v16"
+          docker buildx imagetools create \
+            --tag "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v16" \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.unique_tag }}"
 
-          # unique : EZ a visszaguritas alapja, a stack .env-je ezt hasznalja
-          # v16    : mozgo "legfrissebb" mutato, KENYELEMBOL. A stack SOHA
-          #          ne erre mutasson.
-          docker tag "$LOCAL" "$UNIQUE"
-          docker tag "$LOCAL" "$MOVING"
-
-          docker push "$UNIQUE"
-          docker push "$MOVING"
-
+      - name: Osszegzes
+        run: |
+          echo ">>> Kesz. A stack .env-jebe ez az ertek kerul:"
           echo ""
-          echo ">>> Feltoltve: $UNIQUE"
-          echo ">>> Ezt az erteket ird a stack .env-jebe TAG-kent."
+          echo "    TAG=${{ steps.meta.outputs.unique_tag }}"
