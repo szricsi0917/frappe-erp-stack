@@ -1,11 +1,11 @@
 [
   {
     "url": "https://github.com/frappe/erpnext",
-    "branch": "version-16"
+    "branch": "v16.50.0"
   },
   {
     "url": "https://github.com/frappe/hrms",
-    "branch": "version-16"
+    "branch": "v16.50.0"
   },
   {
     "url": "https://github.com/frappe/telephony",
@@ -17,19 +17,19 @@
   },
   {
     "url": "https://github.com/frappe/insights",
-    "branch": "develop"
+    "branch": "v3.14.2"
   },
   {
     "url": "https://github.com/frappe/builder",
-    "branch": "develop"
+    "branch": "v1.35.1"
   },
   {
     "url": "https://github.com/frappe/wiki",
-    "branch": "develop"
+    "branch": "v3.4.0"
   },
   {
     "url": "https://github.com/frappe/payments",
-    "branch": "develop"
+    "branch": "version-16"
   },
   {
     "url": "https://github.com/frappe/lms",
@@ -45,6 +45,6 @@
   },
   {
     "url": "https://github.com/frappe/crm",
-    "branch": "develop"
+    "branch": "v1.86.0"
   }
 ]
