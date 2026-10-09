@@ -20,6 +20,22 @@ env:
   # Az alap image SOHA nem tartalmazhatja ezt az appot.
   TILTOTT_APP: hegyesihq
 
+  # =================================================================
+  #  A FRAPPE VERZIOJA ES AZ ESZKOZLANC KULON ROGZITVE (F2.4z/B)
+  #
+  #  A frappe_docker Containerfile-ja egyetlen FRAPPE_BRANCH valtozot
+  #  hasznal ket celra: (1) a frappe/build es frappe/base eszkozlanc-
+  #  image cimkeje, (2) a klonozott frappe ag/cimke. A frappe/build
+  #  image-eket a Frappe az ERPNext kiadasaihoz cimkezi (2026-10-09:
+  #  v16.50.0 van, v16.51.0 nincs), ezert a ketto szetvalik:
+  #    FRAPPE_IMAGE_TAG -> eszkozlanc (Python, Node, rendszerkonyvtarak)
+  #    FRAPPE_REF       -> maga a keretrendszer (git cimke)
+  #  A 'version-16' mozgo ag helyett cimke: ket build ugyanabbol a
+  #  commitbol ugyanazt adja.
+  # =================================================================
+  FRAPPE_REF: v16.51.0
+  FRAPPE_IMAGE_TAG: v16.50.0
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -70,6 +86,21 @@ jobs:
             echo "  OK    a '${TILTOTT_APP}' nincs az apps.json-ban"
           fi
 
+          echo ""
+          echo ">>> A frappe cimke es az eszkozlanc-image"
+          if git ls-remote --exit-code https://github.com/frappe/frappe "refs/tags/${FRAPPE_REF}" >/dev/null 2>&1; then
+            echo "  OK    frappe cimke ${FRAPPE_REF}"
+          else
+            echo "  HIBA  nincs ilyen frappe cimke: ${FRAPPE_REF}"; HIBA=1
+          fi
+          for img in build base; do
+            if docker manifest inspect "frappe/${img}:${FRAPPE_IMAGE_TAG}" >/dev/null 2>&1; then
+              echo "  OK    frappe/${img}:${FRAPPE_IMAGE_TAG}"
+            else
+              echo "  HIBA  nincs ilyen image: frappe/${img}:${FRAPPE_IMAGE_TAG}"; HIBA=1
+            fi
+          done
+
           [ "$HIBA" -eq 0 ] || { echo ""; echo "!!! A build el sem indul."; exit 1; }
           echo ""
           echo ">>> Minden rendben, indulhat a build."
@@ -93,6 +124,22 @@ jobs:
           repository: frappe/frappe_docker
           path: frappe_docker
           ref: ${{ env.FRAPPE_DOCKER_REF }}
+
+      # -----------------------------------------------------------------
+      #  A Containerfile kulon ARG-ot kap a frappe cimkehez (FRAPPE_REF).
+      #  Ha a frappe_docker modositana a sort, a build megall: nem
+      #  epitunk csendben a mozgo agrol.
+      # -----------------------------------------------------------------
+      - name: A frappe cimke bekotese a Containerfile-ba
+        run: |
+          F=frappe_docker/images/layered/Containerfile
+          grep -q -- '--frappe-branch=${FRAPPE_BRANCH}' "$F" \
+            || { echo "!!! A Containerfile megvaltozott, a csere nem alkalmazhato."; exit 1; }
+          sed -i 's|--frappe-branch=${FRAPPE_BRANCH}|--frappe-branch=${FRAPPE_REF}|' "$F"
+          sed -i '0,/^ARG CACHE_BUST=""/s//ARG CACHE_BUST=""\nARG FRAPPE_REF/' "$F"
+          grep -q -- '--frappe-branch=${FRAPPE_REF}' "$F" && grep -q '^ARG FRAPPE_REF$' "$F" \
+            || { echo "!!! A csere nem sikerult."; exit 1; }
+          echo ">>> builder szakasz:"; sed -n '1,22p' "$F"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -129,7 +176,8 @@ jobs:
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.unique_tag }}
           build-args: |
             FRAPPE_PATH=https://github.com/frappe/frappe
-            FRAPPE_BRANCH=version-16
+            FRAPPE_BRANCH=${{ env.FRAPPE_IMAGE_TAG }}
+            FRAPPE_REF=${{ env.FRAPPE_REF }}
           # Az apps.json tartalma NEM kerul be az image reteg-metaadatba.
           secret-files: |
             apps_json=${{ github.workspace }}/apps.json
@@ -168,6 +216,23 @@ jobs:
           fi
           echo ""
           echo ">>> OK: minden elvart app benne van."
+
+      # -----------------------------------------------------------------
+      #  A keretrendszer-harmas verzioja az image-ben = a rogzitett cimke.
+      #  (A frappe a FRAPPE_REF-bol, az erpnext es a hrms az apps.json-bol.)
+      # -----------------------------------------------------------------
+      - name: Verziok ellenorzese az image-ben
+        run: |
+          IMG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.unique_tag }}"
+          HIBA=0
+          for app in frappe erpnext hrms; do
+            if [ "$app" = frappe ]; then VART="${FRAPPE_REF#v}"; else
+              VART=$(jq -r --arg a "$app" '.[] | select(.url | endswith("/" + $a)) | .branch' apps.json); VART="${VART#v}"; fi
+            VAN=$(docker run --rm --entrypoint bash "$IMG" -c \
+              "grep -m1 -oP '__version__ = \"\K[^\"]+' /home/frappe/frappe-bench/apps/$app/$app/__init__.py")
+            if [ "$VAN" = "$VART" ]; then echo "  OK   $app $VAN"; else echo "  HIBA $app: $VAN (vart: $VART)"; HIBA=1; fi
+          done
+          [ "$HIBA" -eq 0 ] || { echo "!!! A ':v16' mutato NEM kerul at erre az image-re."; exit 1; }
 
       # =================================================================
       #  A MOZGO MUTATO - csak sikeres ellenorzes utan
