@@ -33,7 +33,7 @@ env:
   #  A 'version-16' mozgo ag helyett cimke: ket build ugyanabbol a
   #  commitbol ugyanazt adja.
   # =================================================================
-  FRAPPE_REF: v16.51.0
+  FRAPPE_REF: v16.53.0
   FRAPPE_IMAGE_TAG: v16.50.0
 
 jobs:
